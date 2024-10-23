@@ -1,0 +1,388 @@
+---
+title: "Evolution of Biodiversity & Diversification"
+format:
+  html:
+    theme: united
+    toc: true
+    code-overflow: wrap
+    embed-resources: true
+---
+
+# Prepare R 
+
+```{r}
+#| label: install-packages
+#| warning: false
+#| error: false
+#| message: false
+#| echo: false
+
+## All packages we will need (I know it's a lot! sorry!)
+package_list <-
+  c(
+    # Data handling
+    "here",
+    "dplyr",
+    "ggplot2",
+    
+    # Phylo packages
+    "ape",
+    "geiger",
+    "phytools",
+    "picante",
+    #"phangorn", # for mcc computation (not needed)
+    "phylobase",
+    "adephylo",
+    
+    # Spatial packages
+    "terra",
+    "sf",
+    "tmap",
+    "viridis",
+    "gen3sis",
+    "RColorBrewer"
+    )
+
+
+## Install packages
+installed_packages <- package_list %in% rownames(installed.packages())
+
+# Install packages not yet installed:
+if (any(installed_packages == FALSE)) {
+  install.packages(
+    package_list[!installed_packages], 
+    repos = "https://mirrors.nic.cz/R/", 
+    dependencies = TRUE)
+}
+
+# Packages loading
+invisible(lapply(package_list, library, character.only = TRUE))
+
+## Test if everything worked :-) 
+if (
+  isTRUE(
+    all(
+      package_list %in%
+        as.data.frame(
+          utils::installed.packages()
+        )[, 1]
+    )
+  )
+) {
+  cat("Everything is good to go")
+} else {
+  warning("All required packages are not installed")
+  warning(
+    paste(
+      "Please install the following packages:",
+      paste(
+        setdiff(
+          package_list,
+          as.data.frame(
+            utils::installed.packages()
+          )[, 1]
+        ),
+        collapse = ", "
+      )
+    )
+  )
+}
+
+```
+
+# Case study: Mammals in Botanical Countries
+
+## Setting up path variables
+
+```{r, libraries}
+#| label: set-path-vars
+
+# Clean working space
+rm(list = ls())
+
+# Paths to our data
+out_path <- here("data")
+occurrence_path <- here("data", "mammals_occu.rds") # Current and past distributions
+
+
+tree_path <- here("data_raw", "Data","Phylogenies", "Complete_phylogeny.nex")
+tax_path <- here("data_raw", "Data", "Traits", "Trait_data.csv")
+shp_path <- here("data_raw","shp")
+
+```
+
+## The Data
+Source: https://github.com/MegaPast2Future/PHYLACINE_1.2/
+
+### A) Phylogenetic tree for mammals
+
+Phylogenetic trees are very uncertain and should be regarded as 'hypothesis of relationship' rather than facts. They are created using bayesian methods and the output of such analyses is a posterior distribution of the result. Therefore, they are very rarely provided as a single tree and rather as a set of 1000 phylogenetic trees that were sampled randomly from said posterior distribution. These trees vary in placement of clades within the tree and branching times. This makes phylogenetic analyses require a lot of computational power, since one line of code can easily take a week to run for a set of 1000 phylogenetic trees with sufficient size.
+
+We will therefore find the maximum clade credibility (MCC) tree, which tries to find the tree with the highest confidence in the placement of clades from the set of 1000 trees.
+
+Please skip this code chunk right below and read in the file for the MCC tree instead (next chunk).
+
+```{r, phylogeny, eval = FALSE}
+#| eval: false
+#| label: create-phylogeny
+
+tree <- read.nexus(tree_path)
+
+```
+
+#### Lineages through time plot 
+```{r}
+#| label: lineages_through_time_plot
+#| eval: false
+
+# Lineages-through-time plot
+
+K_P_massextinction <- max(nodeHeights(tree[[1]]))-66
+
+ltt1 <- ltt(tree, log.lineages = FALSE)
+
+plot(ltt1);abline(v = K_P_massextinction)
+
+ltt1
+plot(ltt1[[1]])
+
+plot(ltt1,log="y",log.lineages=FALSE,
+    bty="l")
+
+```
+
+### B) Occurrence data for mammals (country-scale)
+
+I prepared mammal occurrences for you beforehand, because it takes some time for almost 6000 species. I have provided the code how I prepared this data in the project folder. The range maps were taken from the PHYLACINE database and can be freely downloaded from their repository to reproduce the occurrence data I provided here.
+
+For the sake of time, we will be using the data that I have prepared instead of re-doing the preprocessing.
+
+```{r, occurrence-data}
+#| label: read-occurrence-data
+
+## Please download the file here. It was too big for GitHub:
+# https://drive.google.com/drive/folders/1AKmfRq-jVQ5Siwb-b17v-UIAvUArc1Da?usp=drive_link
+
+occur <- readRDS(occurrence_path)
+
+
+# Inspect the data
+class(occur) # list of 2 sf objects
+head(occur) # presence of species in polygons (botanical countries/LEVEL_3_CO)
+
+
+# Fix some geometry issues (:
+occur_curr <- st_read(shp_path) %>%
+  left_join(occur[[1]] %>% st_drop_geometry()) %>% 
+  st_make_valid()
+
+occur_past <- st_read(shp_path) %>%
+  left_join(occur[[2]] %>% st_drop_geometry()) %>% 
+  st_make_valid()
+```
+
+## 1. Phylogenetic calculations
+
+```{r}
+#| label: species-names-vectors
+
+## Species vectors for matching 
+
+sp_in_tree <- tree[[1]]$tip.label
+sp_in_data1 <- unique(occur_curr$species)
+sp_in_data2 <- unique(occur_past$species)
+```
+
+### Calculate phylogenetic metrics (on the whole tree)
+
+#### Present-day Diversification rates
+
+```{r}
+#| eval: false
+#| label: do-phylo-calculations
+
+# Species evolutionary distinctiveness (ED)
+ed_list <- lapply(tree, evol.distinct)
+saveRDS(ed_list, here("data", "ED_list.rds"))
+
+ED <- do.call(rbind, ed_list)
+
+PDR <- ED %>% 
+  group_by(Species) %>% 
+  summarise(MDR = mean(w^-1))
+
+saveRDS(PDR, here("data", "PDR.rds")) ## Present-day diversification rates (across all trees)
+
+```
+
+#### Clade diversification rates
+```{r}
+#| eval: false
+
+# Diversification rates of whole clades (RD) 
+# (root tip distance = number of nodes between root and tip)
+
+
+rd0_list <- lapply(tree, function(single_tree) {
+  distRoot(single_tree, tips = "all", method = c("nNodes"))
+})
+
+rd <- do.call(rbind, rd0_list)
+
+rownames(rd) <- paste0("tree_", 1:1000)
+
+root_distance <- rd %>% 
+  as.data.frame() %>% 
+  summarise(across(everything(), mean)) %>% 
+  t() %>% 
+  as.data.frame()
+
+saveRDS(root_distance, file.path(out_path, "RD.rds")) ## Mean root distance (across all trees)
+```
+
+
+### Match tree and data
+
+```{r}
+#| label: drop-tips-from-tree
+
+# Drop species from the tree for which we do not have data
+tree_curr <- keep.tip(tree, intersect(sp_in_tree, sp_in_data1)) %>% 
+  # Ladderize the tree again
+  ladderize()
+
+
+# Drop species from the tree for which we do not have data
+tree_past <- keep.tip(tree, intersect(sp_in_tree, sp_in_data2)) %>% 
+  # Ladderize the tree again
+  ladderize()
+```
+
+### Plot Diversification rates on the tree
+
+The phylogeny can help to demonstrate what exactly DR measures, given that short branches are generally associated with high DR, while the opposite holds for long branches. Let's visualize it.
+
+### Species richness 
+
+```{r}
+#| label: create-plotting-data-SR
+
+richness_curr <- occur_curr %>% 
+  # st_make_valid() %>%
+  group_by(LEVEL_3_CO) %>% 
+  # Calculate species richness per country:
+  mutate(SR = sum(presence)) %>% 
+  dplyr::select(LEVEL_3_CO, SR) %>%
+  unique()
+
+
+richness_past <- occur_past %>% 
+  # st_make_valid() %>%
+  group_by(LEVEL_3_CO) %>% 
+  # Calculate species richness per country:
+  mutate(SR = sum(presence)) %>% 
+  dplyr::select(LEVEL_3_CO, SR) %>%
+  unique()
+```
+
+### Diversification Metrics
+
+```{r}
+#| label: create-plotting-data-DR-RD
+
+PDR <- readRDS(here("data", "PDR.rds")) 
+
+# Present-day diversification rates (DR)
+PDR2 <- as.data.frame(PDR)
+PDR2$species <- PDR2$Species
+PDR3_curr <- left_join(occur_curr, PDR2) 
+PDR3_past <- left_join(occur_past, PDR2) 
+
+diversification_curr <- PDR3_curr %>% 
+  filter(!is.na(MDR)) %>%
+  dplyr::select(LEVEL_3_CO, MDR) %>%
+  group_by(LEVEL_3_CO) %>% 
+  dplyr::mutate(mean_DR = mean(MDR, na.rm=T)) %>%
+  dplyr::select(-MDR) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(scaled_DR =((mean_DR - min(mean_DR)) / (max(mean_DR) - min(mean_DR)))) 
+
+
+diversification_past <- PDR3_past %>% 
+  filter(!is.na(MDR)) %>%
+  dplyr::select(LEVEL_3_CO, MDR) %>%
+  group_by(LEVEL_3_CO) %>% 
+  dplyr::mutate(mean_DR = mean(MDR, na.rm=T)) %>%
+  dplyr::select(-MDR) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(scaled_DR =((mean_DR - min(mean_DR)) / (max(mean_DR) - min(mean_DR)))) 
+
+```
+
+```{r}
+# Clade diversification (Root distance, RD)
+root_distance <- readRDS(here("data", "RD.rds"))
+
+str(root_distance)
+root_distance$species <- rownames(root_distance)
+names(root_distance) <- c("MRD", "species")
+
+root_distance_curr <- left_join(occur_past, root_distance) %>% 
+  filter(!is.na(MRD)) %>%
+  dplyr::select(LEVEL_3_CO, MRD) %>%
+  group_by(LEVEL_3_CO) %>% 
+  dplyr::mutate(mean_RD = mean(MRD, na.rm=T)) %>%
+  dplyr::select(-MRD) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(scaled_RD =((mean_RD - min(mean_RD)) / (max(mean_RD) - min(mean_RD))))
+
+root_distance_past <- left_join(occur_curr, root_distance) %>% filter(!is.na(MRD)) %>%
+  dplyr::select(LEVEL_3_CO, MRD) %>%
+  group_by(LEVEL_3_CO) %>% 
+  dplyr::mutate(mean_RD = mean(MRD, na.rm=T)) %>%
+  dplyr::select(-MRD) %>%
+  unique() %>%
+  ungroup() %>%
+  mutate(scaled_RD =((mean_RD - min(mean_RD)) / (max(mean_RD) - min(mean_RD))))
+
+```
+
+## Species richness vs. Diversification
+
+```{r}
+#| label: plot-maps
+
+my_palette <- viridis(12, option = "D")  
+
+#Plot:
+tm_shape(richness_curr) +
+  tm_polygons("SR", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Species Richness (current)")
+
+tm_shape(richness_past) +
+  tm_polygons("SR", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Species Richness (Present-Natural)")
+
+
+#Plot:
+tm_shape(diversification_curr) +
+  tm_polygons("scaled_DR", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Present-day Diversification (current)")
+
+tm_shape(diversification_past) +
+  tm_polygons("scaled_DR", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Present-day Diversification (Present-Natural)")
+
+
+# Plot
+tm_shape(root_distance_curr) +
+  tm_polygons("scaled_RD", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Clade Diversification (current)")
+tm_shape(root_distance_past) +
+  tm_polygons("scaled_RD", palette = my_palette) + 
+  tm_layout(main.title = "Mammals - Clade Diversification (Present-Natural)")
+```
+
